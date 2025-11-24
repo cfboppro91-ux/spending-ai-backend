@@ -4,3 +4,4 @@ pydantic
 numpy
 pandas
 scikit-learn
+openai
