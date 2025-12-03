@@ -162,36 +162,67 @@ def generate_saving_tips(summary, habits, projection):
         tips.append("Tình hình ổn, tiếp tục theo dõi.")
     return tips
 
-def analyze_and_predict_v2(transactions: List[Dict[str,Any]],
-                           bank_transactions: Optional[List[Dict[str,Any]]] = None,
-                           current_balance: Optional[float]=None):
-    # merge
+def analyze_and_predict_v2(
+    transactions: List[Dict[str,Any]],
+    bank_transactions: Optional[List[Dict[str,Any]]] = None,
+    current_balance: Optional[float] = None
+):
+    # ====== MERGE DATA ======
     bank_tx = bank_transactions or []
     merged = merge_transactions(transactions, bank_tx)
 
-    # (sau đó dùng merged thay cho transactions ở mọi chỗ)
+    # ====== BUILD MONTHLY SERIES ======
     series = build_monthly_series(merged)
     basic = predict_next_month_expense_v2(series)
     per_cat = per_category_forecast(series)
-    # habits: top categories last month: unchanged but from series
-    ...
+
+    # ====== HABITS ======
+    top_struct = []
+    if series:
+        last = series[-1]
+        total = last["expense"] or 1
+        for cat, amt in sorted(last["per_category"].items(), key=lambda x: x[1], reverse=True)[:3]:
+            top_struct.append({
+                "categoryId": cat,
+                "expense": float(amt),
+                "share": float(amt) / total
+            })
+
+    habits = {
+        "top_categories_last_month": top_struct
+    }
+
+    # ====== DAILY PROJECTION ======
     projection = compute_daily_projection(merged, current_balance=current_balance)
+
+    # ====== ANOMALIES ======
     anomalies = detect_anomalies(merged)
-    ...
+
+    # ====== SUMMARY ======
+    summary = {
+        "total_income": float(sum(m["income"] for m in series)),
+        "total_expense": float(sum(m["expense"] for m in series)),
+        "months_count": len(series)
+    }
+
+    # ====== SAVING TIPS ======
+    saving_tips = generate_saving_tips(summary, habits, projection)
+
+    # ====== FINAL RESPONSE ======
     return {
-      "summary": summary,
-      "prediction": basic,
-      "per_category_prediction": per_cat,
-      "habits": {"top_categories_last_month": top_struct},
-      "projection": projection,
-      "anomalies": anomalies,
-      "saving_tips": saving_tips,
-      "raw_monthly_series": series,
-      "meta": {
-         "merged_count": len(merged),
-         "app_count": len(transactions),
-         "bank_count": len(bank_tx),
-      }
+        "summary": summary,
+        "prediction": basic,
+        "per_category_prediction": per_cat,
+        "habits": habits,
+        "projection": projection,
+        "anomalies": anomalies,
+        "saving_tips": saving_tips,
+        "raw_monthly_series": series,
+        "meta": {
+            "merged_count": len(merged),
+            "app_count": len(transactions),
+            "bank_count": len(bank_tx),
+        }
     }
 
 # optional small persistence
