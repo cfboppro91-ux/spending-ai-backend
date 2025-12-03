@@ -65,7 +65,7 @@ def chat_spending_assistant(body: ChatRequest):
 
     system_prompt = (
         "Bạn là trợ lý tài chính cá nhân, trả lời ngắn gọn, thân thiện, tiếng Việt.\n"
-        "KHI TRẢ LỜI: luôn **trích dẫn số liệu** nếu dùng (ví dụ: 'Dự đoán: ~1.2 triệuđ (±300k)')\n"
+        "KHI TRẢ LỜI: luôn **trích dẫn số liệu** \n"
         "Không bịa số liệu ngoài JSON tớ gửi.\n"
         "Đề xuất hành động ngắn gọn 1-2 bước.\n"
     )
