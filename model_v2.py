@@ -1,205 +1,274 @@
 # ai-backend/model_v2.py
-from datetime import datetime
+from datetime import datetime, timedelta
 from collections import defaultdict
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional
 import numpy as np
+import pandas as pd
+from sklearn.ensemble import GradientBoostingRegressor
 from sklearn.linear_model import LinearRegression
-from sklearn.ensemble import IsolationForest
-from joblib import dump, load
-import math
+import joblib
+import os
 
-def parse_date(d: str) -> datetime:
-    return datetime.strptime(d, "%Y-%m-%d")
+# --- helper parse ---
+def to_date(s):
+    if isinstance(s, str):
+        return datetime.strptime(s[:10], "%Y-%m-%d").date()
+    if isinstance(s, datetime):
+        return s.date()
+    return s
 
-def build_monthly_series(transactions: List[Dict[str,Any]]):
-    months = {}
+# -----------------------
+# TRAIN / PREDICT utilities
+# -----------------------
+
+def aggregate_monthly(transactions: List[Dict[str,Any]]):
+    # return DataFrame with index yyyy-mm, columns: income, expense, total, per-category
+    rows = []
     for t in transactions:
-        try:
-            dt = parse_date(t["date"])
-        except Exception:
-            continue
-        key = f"{dt.year}-{dt.month:02d}"
-        if key not in months:
-            months[key] = {"year": dt.year, "month": dt.month, "income":0.0, "expense":0.0, "per_category":defaultdict(float)}
-        amt = float(t.get("amount") or 0)
-        ttype = t.get("type","expense")
-        cat = t.get("categoryId","unknown")
-        if ttype == "income":
-            months[key]["income"] += amt
-        else:
-            months[key]["expense"] += amt
-            months[key]["per_category"][cat] += amt
-    keys = sorted(months.keys())
-    return [months[k] for k in keys]
+        d = to_date(t['date'])
+        rows.append({'ym': d.strftime("%Y-%m"), 'type': t['type'], 'amount': float(t['amount'] or 0), 'category': t.get('categoryId','unknown')})
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return pd.DataFrame()
+    df_income = df[df.type=='income'].groupby('ym').amount.sum().rename('income')
+    df_exp = df[df.type!='income'].groupby('ym').amount.sum().rename('expense')
+    df_total = pd.concat([df_income, df_exp], axis=1).fillna(0)
+    df_total['net'] = df_total['income'] - df_total['expense']
+    df_total = df_total.sort_index()
+    return df_total
 
-def linear_predict(y: np.ndarray) -> Tuple[float, float]:
-    # returns (pred, std_residual)
-    if len(y) == 0:
-        return 0.0, 0.0
-    X = np.arange(len(y)).reshape(-1,1)
-    if len(y) >= 3:
-        m = LinearRegression()
-        m.fit(X,y)
-        pred = float(m.predict([[len(y)]])[0])
-        residuals = y - m.predict(X)
-        std = float(np.std(residuals, ddof=1)) if len(residuals) > 1 else float(np.std(residuals))
-        return max(0.0, pred), std
+def build_features_for_monthly(df_monthly: pd.DataFrame, lags=3):
+    # df_monthly index: yyyy-mm
+    X, y = [], []
+    idxs = df_monthly.index.tolist()
+    for i in range(lags, len(idxs)):
+        row = []
+        # lag income and expense
+        for lag in range(1, lags+1):
+            row.append(df_monthly.iloc[i-lag].income)
+            row.append(df_monthly.iloc[i-lag].expense)
+        # moving averages
+        row.append(df_monthly.iloc[i-lags:i].expense.mean())
+        row.append(df_monthly.iloc[i-lags:i].income.mean())
+        X.append(row)
+        y.append(df_monthly.iloc[i].expense)
+    return np.array(X), np.array(y)
+
+# -----------------------
+# Model container helpers
+# -----------------------
+MODEL_DIR = os.environ.get('AI_MODEL_DIR','./ai_models')
+os.makedirs(MODEL_DIR, exist_ok=True)
+MODEL_PATH = os.path.join(MODEL_DIR, 'model_v2.joblib')
+
+class V2Model:
+    def __init__(self):
+        # higher-level regressor for monthly expense
+        self.monthly_regressor = None  # GradientBoostingRegressor
+        # per-category regressors (dict cat -> regressor)
+        self.cat_regressors = {}
+        # metadata
+        self.lags = 3
+
+    def save(self, path=MODEL_PATH):
+        joblib.dump({
+            'monthly_regressor': self.monthly_regressor,
+            'cat_regressors': self.cat_regressors,
+            'lags': self.lags
+        }, path)
+
+    @classmethod
+    def load(cls, path=MODEL_PATH):
+        if not os.path.exists(path):
+            return cls()
+        data = joblib.load(path)
+        m = cls()
+        m.monthly_regressor = data.get('monthly_regressor')
+        m.cat_regressors = data.get('cat_regressors', {})
+        m.lags = data.get('lags', 3)
+        return m
+
+# -----------------------
+# Training function
+# -----------------------
+def train_model_from_transactions(transactions: List[Dict[str,Any]]):
+    """
+    Train:
+      - monthly_regressor: predict next month's total expense
+      - cat_regressors: for each top category, a simple LinearRegression on monthly expense per category
+    """
+    dfm = aggregate_monthly(transactions)
+    if dfm.empty or len(dfm) < 4:
+        # not enough data
+        model = V2Model()
+        return model
+
+    # monthly regressor
+    X, y = build_features_for_monthly(dfm, lags=3)
+    if len(y) < 2:
+        model = V2Model()
+        return model
+
+    reg = GradientBoostingRegressor(n_estimators=200, random_state=42)
+    reg.fit(X, y)
+
+    # per-category: aggregate per month per category
+    rows = []
+    for t in transactions:
+        d = to_date(t['date'])
+        ym = d.strftime("%Y-%m")
+        rows.append({'ym': ym, 'category': t.get('categoryId','unknown'), 'type': t['type'], 'amount': float(t['amount'] or 0)})
+    df = pd.DataFrame(rows)
+    if df.empty:
+        cats = []
     else:
-        mean = float(np.mean(y))
-        std = float(np.std(y)) if len(y)>1 else 0.0
-        return mean, std
+        df_exp = df[df.type!='income'].groupby(['ym','category']).amount.sum().reset_index()
+        # pivot per category
+        pivot = df_exp.pivot(index='ym', columns='category', values='amount').fillna(0)
+        # pick top categories by recent total
+        recent_sum = pivot.sum().sort_values(ascending=False)
+        top_cats = recent_sum.head(10).index.tolist()
+        cat_regs = {}
+        for cat in top_cats:
+            ser = pivot[cat]
+            # if not enough non-zero months, skip linear fit, fallback to mean
+            if ser.sum() == 0:
+                continue
+            # build simple lag features for cat
+            s = ser.values
+            if len(s) >= 4:
+                Xc, yc = [], []
+                lag = 3
+                for i in range(lag, len(s)):
+                    feat = []
+                    for j in range(1, lag+1):
+                        feat.append(s[i-j])
+                    Xc.append(feat)
+                    yc.append(s[i])
+                lr = LinearRegression()
+                lr.fit(np.array(Xc), np.array(yc))
+                cat_regs[cat] = lr
+            else:
+                # fallback store mean
+                cat_regs[cat] = ('mean', float(s.mean()))
+    model = V2Model()
+    model.monthly_regressor = reg
+    model.cat_regressors = cat_regs
+    model.save()
+    return model
 
-def predict_next_month_expense_v2(series: List[Dict[str,Any]]):
-    if not series:
-        return {"predicted":0.0, "method":"no_data", "conf_interval":[0.0,0.0], "history": []}
-    y = np.array([m["expense"] for m in series], dtype=float)
-    pred, std = linear_predict(y)
-    # 95% CI approx
-    lo = max(0.0, pred - 1.96 * (std or 0.0))
-    hi = pred + 1.96 * (std or 0.0)
-    method = "linear_regression" if len(y) >= 3 else "mean_fallback"
-    return {
-        "predicted": pred,
-        "method": method,
-        "conf_interval": [lo, hi],
-        "history": [{"year":m["year"], "month":m["month"], "expense":float(m["expense"]), "income":float(m["income"])} for m in series]
-    }
+# -----------------------
+# Serving: predict functions
+# -----------------------
+def predict_next_month_expense_from_transactions(model: V2Model, transactions: List[Dict[str,Any]]):
+    dfm = aggregate_monthly(transactions)
+    if dfm.empty:
+        return 0.0, 'no_data'
+    # if no trained regressor, fallback to simple heuristic (avg of last 3 months)
+    if not model.monthly_regressor:
+        last_n = dfm['expense'].tail(3).mean()
+        return float(last_n), 'heuristic_avg'
+    # build feature vector from last lags
+    lags = model.lags
+    if len(dfm) < lags:
+        arr = np.concatenate([np.zeros((lags-len(dfm),2)), dfm[['income','expense']].values])
+    else:
+        arr = dfm[['income','expense']].values
+    # take last lags rows
+    last = arr[-lags:]
+    feat = []
+    for i in range(lags):
+        feat.append(last[-1-i][0])  # income lag1..lagN (we reverse below)
+        feat.append(last[-1-i][1])
+    feat = feat[::-1]  # make order lag1,lag1_exp,lag2,...
+    # append moving means
+    feat.append(arr[-lags:,1].mean())
+    feat.append(arr[-lags:,0].mean())
+    X = np.array(feat).reshape(1,-1)
+    pred = float(model.monthly_regressor.predict(X)[0])
+    if pred < 0:
+        pred = 0.0
+    return pred, 'model_v2'
 
-def per_category_forecast(series: List[Dict[str,Any]]):
-    # build monthly per-category series and run linear fit per category
-    # output: {cat: {pred, method, conf_interval}}
-    # aggregate months index
-    months = [f'{m["year"]}-{m["month"]:02d}' for m in series]
-    cat_map = defaultdict(list)  # cat -> list aligned with months
-    for m in series:
-        for cat, amt in m["per_category"].items():
-            cat_map[cat].append((f'{m["year"]}-{m["month"]:02d}', float(amt)))
-    res = {}
-    for cat, pairs in cat_map.items():
-        # align to full months (fill 0 if missing)
-        month_to_amt = {k:v for k,v in pairs}
-        y = np.array([month_to_amt.get(mon, 0.0) for mon in months], dtype=float)
-        pred, std = linear_predict(y)
-        lo = max(0.0, pred - 1.96 * (std or 0.0))
-        hi = pred + 1.96 * (std or 0.0)
-        res[cat] = {"predicted":pred, "conf_interval":[lo,hi], "method": "linear_regression" if len(y)>=3 else "mean_fallback"}
-    return res
-
-def detect_anomalies(transactions: List[Dict[str,Any]]):
-    # simple: z-score on amounts for expense and income separately, fallback to IsolationForest
-    amounts = np.array([float(t.get("amount") or 0) for t in transactions])
-    if len(amounts) >= 6:
-        mean = amounts.mean()
-        std = amounts.std(ddof=1) if len(amounts) > 1 else 0.0
-        anomalies = []
-        if std > 0:
-            for t in transactions:
-                z = (float(t.get("amount") or 0) - mean)/std
-                if abs(z) > 3.0:
-                    anomalies.append({"id": t.get("id"), "date": t.get("date"), "amount": t.get("amount"), "z": float(z)})
-            if anomalies:
-                return anomalies
-    # fallback IsolationForest (works on amounts)
-    try:
-        amounts_reshaped = amounts.reshape(-1,1)
-        iso = IsolationForest(contamination=0.03, random_state=42)
-        iso.fit(amounts_reshaped)
-        preds = iso.predict(amounts_reshaped)  # -1 anomaly
-        anomalies = []
-        for i, p in enumerate(preds):
-            if p == -1:
-                t = transactions[i]
-                anomalies.append({"id": t.get("id"), "date": t.get("date"), "amount": t.get("amount")})
-        return anomalies
-    except Exception:
-        return []
-
-def compute_daily_projection(transactions, current_balance=None, max_days=60):
-    # reuse simple average daily net approach (same as your old code)
-    # ... keep as before (omitted for brevity) or import if you prefer
-    # quick re-use small impl:
-    day_map={}
+def predict_category_spend_next_month(model: V2Model, transactions: List[Dict[str,Any]]):
+    # returns dict category -> predicted amount
+    rows = []
     for t in transactions:
-        try:
-            dt = parse_date(t["date"])
-        except Exception:
-            continue
-        key = dt.strftime("%Y-%m-%d")
-        day_map.setdefault(key, {"income":0.0,"expense":0.0})
-        amt = float(t.get("amount") or 0)
-        if t.get("type")=="income":
-            day_map[key]["income"] += amt
+        d = to_date(t['date'])
+        rows.append({'ym': d.strftime("%Y-%m"), 'category': t.get('categoryId','unknown'), 'type': t.get('type','expense'), 'amount': float(t.get('amount') or 0)})
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return {}
+    df_exp = df[df.type!='income'].groupby(['ym','category']).amount.sum().reset_index()
+    pivot = df_exp.pivot(index='ym', columns='category', values='amount').fillna(0)
+    preds = {}
+    for cat, reg in model.cat_regressors.items():
+        if isinstance(reg, tuple) and reg[0] == 'mean':
+            preds[cat] = float(reg[1])
         else:
-            day_map[key]["expense"] += amt
-    sorted_days = sorted(day_map.keys())
-    if len(sorted_days) > max_days:
-        sorted_days = sorted_days[-max_days:]
-    incomes = [day_map[d]["income"] for d in sorted_days]
-    expenses = [day_map[d]["expense"] for d in sorted_days]
-    import numpy as _np
-    avg_inc = float(_np.mean(incomes)) if incomes else 0.0
-    avg_exp = float(_np.mean(expenses)) if expenses else 0.0
-    avg_net = avg_inc - avg_exp
-    proj_30_exp = max(0.0, avg_exp * 30)
-    proj_bal = None
-    if current_balance is not None:
-        proj_bal = float(current_balance + avg_net * 30)
-    return {"avg_daily_income":avg_inc,"avg_daily_expense":avg_exp,"avg_daily_net":avg_net,"projected_30d_expense":proj_30_exp,"projected_30d_balance":proj_bal,"days_used":len(sorted_days)}
+            s = pivot.get(cat)
+            if s is None:
+                # no data -> 0
+                preds[cat] = 0.0
+            else:
+                arr = s.values
+                # need last lag values
+                lag = 3
+                if len(arr) < lag:
+                    feat = np.concatenate([np.zeros(lag-len(arr)), arr])[-lag:]
+                else:
+                    feat = arr[-lag:]
+                feat = feat[::-1].reshape(1,-1)
+                p = float(reg.predict(feat)[0])
+                preds[cat] = max(0.0, p)
+    # also include residual (other categories) as mean of others
+    return preds
 
-def generate_saving_tips(summary, habits, projection):
-    # you can reuse original rules; simplified here
-    tips=[]
-    total_income = summary.get("total_income",0.0)
-    total_expense = summary.get("total_expense",0.0)
-    months_count = summary.get("months_count",0)
-    if months_count>=2 and total_expense>total_income:
-        tips.append("Chi vượt thu: cân nhắc giảm chi tiêu hoặc tìm nguồn thu thêm.")
-    top = (habits.get("top_categories_last_month") or [])
-    if top and top[0].get("share",0) >= 0.4:
-        tips.append("Một nhóm chiếm >40% chi tháng gần nhất, xem lại nhóm đó.")
-    if not tips:
-        tips.append("Tình hình ổn, tiếp tục theo dõi.")
-    return tips
+def predict_30d_balance_and_burn_date(transactions: List[Dict[str,Any]], current_balance: float, avg_daily_net_override: Optional[float]=None):
+    """
+    Compute avg daily net from transactions and project 30 days.
+    avg_daily_net_override: if provided, use it instead of computed
+    Return: projected_balance_30d, burn_date_or_none
+    """
+    if not transactions:
+        return current_balance, None
+    # group by date
+    day_map = defaultdict(float)
+    for t in transactions:
+        d = to_date(t['date'])
+        key = d.strftime("%Y-%m-%d")
+        amt = float(t.get('amount') or 0)
+        if t.get('type') == 'income':
+            day_map[key] += amt
+        else:
+            day_map[key] -= amt
+    # get recent 60 days
+    days = sorted(day_map.keys())
+    amounts = [day_map[d] for d in days]
+    if avg_daily_net_override is not None:
+        avg = avg_daily_net_override
+    else:
+        avg = float(np.mean(amounts)) if amounts else 0.0
+    proj_30 = current_balance + avg * 30.0
+    # estimate burn date: find day N where current_balance + avg*N <= 0
+    burn_date = None
+    if avg < 0:
+        days_to_zero = int(np.ceil(-current_balance / avg)) if avg != 0 else None
+        if days_to_zero is not None and days_to_zero >= 0:
+            burn_date = (datetime.utcnow().date() + timedelta(days=days_to_zero)).isoformat()
+    return float(proj_30), burn_date
 
-def analyze_and_predict_v2(transactions: List[Dict[str,Any]], current_balance: Optional[float]=None):
-    series = build_monthly_series(transactions)
-    basic = predict_next_month_expense_v2(series)
-    per_cat = per_category_forecast(series)
-    habits = {
-        "top_categories_last_month": [] if not series else sorted(series[-1]["per_category"].items(), key=lambda x:x[1], reverse=True)[:3]
-    }
-    # convert top to structured
-    top_struct=[]
-    if series:
-        last = series[-1]
-        total = last["expense"] or 1.0
-        for k,v in sorted(last["per_category"].items(), key=lambda x:x[1], reverse=True)[:3]:
-            top_struct.append({"categoryId":k, "expense":float(v), "share": float(v)/total})
-    habits["top_categories_last_month"] = top_struct
-
-    projection = compute_daily_projection(transactions, current_balance=current_balance)
-    anomalies = detect_anomalies(transactions)
-    summary = {
-        "total_income": float(sum(m["income"] for m in series)) if series else 0.0,
-        "total_expense": float(sum(m["expense"] for m in series)) if series else 0.0,
-        "months_count": len(series)
-    }
-    saving_tips = generate_saving_tips(summary, {"top_categories_last_month": top_struct}, projection)
-
+# -----------------------
+# Convenience: top-level predict wrapper
+# -----------------------
+def predict_all(model: V2Model, transactions: List[Dict[str,Any]], current_balance: Optional[float]=0.0):
+    next_month_expense, method = predict_next_month_expense_from_transactions(model, transactions)
+    per_cat = predict_category_spend_next_month(model, transactions)
+    proj_30_balance, burn_date = predict_30d_balance_and_burn_date(transactions, float(current_balance or 0.0))
     return {
-        "summary": summary,
-        "prediction": basic,
-        "per_category_prediction": per_cat,
-        "habits": {"top_categories_last_month": top_struct},
-        "projection": projection,
-        "anomalies": anomalies,
-        "saving_tips": saving_tips,
-        "raw_monthly_series": series
+        'next_month_expense': next_month_expense,
+        'next_month_method': method,
+        'per_category_prediction': per_cat,
+        'projected_balance_30d': proj_30_balance,
+        'predicted_burn_date': burn_date
     }
-
-# optional small persistence
-def save_model(obj, path="models/ai_model.joblib"):
-    dump(obj, path)
-
-def load_model(path="models/ai_model.joblib"):
-    return load(path)
