@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 
 from model import analyze_and_predict
-from model_v2 import predict_all, V2Model
+from model_v2 import analyze_and_predict_v2
 
 # OpenAI client (lib mới)
 from openai import OpenAI
