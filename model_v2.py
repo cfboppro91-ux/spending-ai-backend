@@ -57,9 +57,15 @@ def build_features_for_monthly(df_monthly: pd.DataFrame, lags=3):
 # -----------------------
 # Model container helpers
 # -----------------------
-MODEL_DIR = os.environ.get('AI_MODEL_DIR','./ai_models')
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))  # this becomes /opt/render/project/src/ai-backend/
+DEFAULT_MODEL_DIR = os.path.join(BASE_DIR, "ai_models")
+
+MODEL_DIR = os.environ.get("AI_MODEL_DIR", DEFAULT_MODEL_DIR)
+
+# ensure directory exists safely
 os.makedirs(MODEL_DIR, exist_ok=True)
-MODEL_PATH = os.path.join(MODEL_DIR, 'model_v2.joblib')
+
+MODEL_PATH = os.path.join(MODEL_DIR, "model_v2.joblib")
 
 class V2Model:
     def __init__(self):
