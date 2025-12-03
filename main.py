@@ -28,14 +28,12 @@ class Transaction(BaseModel):
 
 class PredictRequest(BaseModel):
     transactions: List[Transaction]
-    bank_transactions: Optional[List[Transaction]] = None
     current_balance: Optional[float] = None
 
 
 class ChatRequest(BaseModel):
     question: str
     transactions: List[Transaction]
-    bank_transactions: Optional[List[Transaction]] = None
     current_balance: Optional[float] = None
 
 
@@ -46,47 +44,62 @@ def root():
 
 @app.post("/predict")
 def predict_spending(body: PredictRequest):
-    tx_list = [t.dict() for t in body.transactions]
-    bank_tx_list = [t.dict() for t in (body.bank_transactions or [])]
-    result = analyze_and_predict_v2(tx_list, bank_transactions=bank_tx_list, current_balance=body.current_balance)
+    tx_list: List[Dict[str, Any]] = [t.dict() for t in body.transactions]
+    result = analyze_and_predict(
+        tx_list,
+        current_balance=body.current_balance
+    )
     return result
+
 
 @app.post("/chat")
 def chat_spending_assistant(body: ChatRequest):
-    tx_list = [t.dict() for t in body.transactions]
-    bank_tx_list = [t.dict() for t in (body.bank_transactions or [])]
-    analysis = analyze_and_predict_v2(tx_list, bank_transactions=bank_tx_list, current_balance=body.current_balance)
+    """
+    Trợ lý tài chính:
+    - Nhận câu hỏi tự nhiên (ăn uống, giải trí…)
+    - Có dữ liệu chi tiêu + số dư ước tính
+    - Dùng OpenAI để trả lời.
+    """
+    tx_list: List[Dict[str, Any]] = [t.dict() for t in body.transactions]
 
-    # prepare a brief structured summary to give to LLM (max N chars)
-    summary = {
-        "total_income": analysis["summary"]["total_income"],
-        "total_expense": analysis["summary"]["total_expense"],
-        "months_count": analysis["summary"]["months_count"],
-        "next_month_pred": analysis["prediction"]["predicted"],
-        "next_month_ci": analysis["prediction"]["conf_interval"],
-        "top_categories_last_month": analysis["habits"]["top_categories_last_month"],
-    }
+    # Phân tích lại bằng model.py cho chắc (thói quen, dự đoán, tips…)
+    analysis = analyze_and_predict(
+        tx_list,
+        current_balance=body.current_balance
+    )
+
+    # Gom context gửi cho LLM
+    context_json = json.dumps(analysis, ensure_ascii=False)
 
     system_prompt = (
-        "Bạn là trợ lý tài chính cá nhân, trả lời ngắn gọn, thân thiện, tiếng Việt.\n"
-        "KHI TRẢ LỜI: luôn **trích dẫn số liệu** \n"
-        "Không bịa số liệu ngoài JSON tớ gửi.\n"
-        "Đề xuất hành động ngắn gọn 1-2 bước.\n"
+        "Bạn là trợ lý tài chính cá nhân, trả lời bằng tiếng Việt, thân thiện, ngắn gọn.\n"
+        "Bạn sẽ nhận được:\n"
+        "- Một câu hỏi của người dùng về chi tiêu / ăn uống / giải trí / kế hoạch tiền bạc.\n"
+        "- Một JSON chứa phân tích chi tiêu: tổng thu/chi, dự đoán tháng sau, thói quen chi tiêu, gợi ý tiết kiệm.\n\n"
+        "Nhiệm vụ:\n"
+        "1. Trả lời đúng trọng tâm câu hỏi.\n"
+        "2. Dựa trên số liệu trong JSON để đưa ví dụ cụ thể (số tiền, xu hướng... nếu phù hợp).\n"
+        "3. Không bịa số liệu ngoài những gì JSON cung cấp.\n"
+        "4. Không nói về JSON, chỉ nói như đang hiểu rõ tình hình tài chính của người dùng.\n"
     )
 
     user_prompt = (
-        f"Câu hỏi: {body.question}\n\n"
-        f"Tóm tắt số liệu: {json.dumps(summary, ensure_ascii=False)}\n\n"
-        "Trả lời ngắn gọn, dễ hiểu."
+        f"Câu hỏi của người dùng: {body.question}\n\n"
+        f"Dữ liệu phân tích chi tiêu (JSON):\n{context_json}"
     )
 
     completion = client.chat.completions.create(
-        model="gpt-4.1-mini",
+        model="gpt-4.1-mini",  # hoặc gpt-4.1 / gpt-4.1-mini tuỳ plan
         messages=[
-            {"role":"system","content":system_prompt},
-            {"role":"user","content":user_prompt},
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
         ],
-        temperature=0.2,
+        temperature=0.3,
     )
+
     answer = completion.choices[0].message.content
-    return {"answer": answer, "analysis": analysis}
+
+    return {
+        "answer": answer,
+        "analysis": analysis,
+    }
