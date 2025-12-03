@@ -28,12 +28,14 @@ class Transaction(BaseModel):
 
 class PredictRequest(BaseModel):
     transactions: List[Transaction]
+    bank_transactions: Optional[List[Transaction]] = None
     current_balance: Optional[float] = None
 
 
 class ChatRequest(BaseModel):
     question: str
     transactions: List[Transaction]
+    bank_transactions: Optional[List[Transaction]] = None
     current_balance: Optional[float] = None
 
 
@@ -45,13 +47,15 @@ def root():
 @app.post("/predict")
 def predict_spending(body: PredictRequest):
     tx_list = [t.dict() for t in body.transactions]
-    result = analyze_and_predict_v2(tx_list, current_balance=body.current_balance)
+    bank_tx_list = [t.dict() for t in (body.bank_transactions or [])]
+    result = analyze_and_predict_v2(tx_list, bank_transactions=bank_tx_list, current_balance=body.current_balance)
     return result
 
 @app.post("/chat")
 def chat_spending_assistant(body: ChatRequest):
     tx_list = [t.dict() for t in body.transactions]
-    analysis = analyze_and_predict_v2(tx_list, current_balance=body.current_balance)
+    bank_tx_list = [t.dict() for t in (body.bank_transactions or [])]
+    analysis = analyze_and_predict_v2(tx_list, bank_transactions=bank_tx_list, current_balance=body.current_balance)
 
     # prepare a brief structured summary to give to LLM (max N chars)
     summary = {

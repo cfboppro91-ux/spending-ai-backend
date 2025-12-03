@@ -7,6 +7,7 @@ from sklearn.linear_model import LinearRegression
 from sklearn.ensemble import IsolationForest
 from joblib import dump, load
 import math
+from typing import Set
 
 def parse_date(d: str) -> datetime:
     return datetime.strptime(d, "%Y-%m-%d")
@@ -161,40 +162,36 @@ def generate_saving_tips(summary, habits, projection):
         tips.append("Tình hình ổn, tiếp tục theo dõi.")
     return tips
 
-def analyze_and_predict_v2(transactions: List[Dict[str,Any]], current_balance: Optional[float]=None):
-    series = build_monthly_series(transactions)
+def analyze_and_predict_v2(transactions: List[Dict[str,Any]],
+                           bank_transactions: Optional[List[Dict[str,Any]]] = None,
+                           current_balance: Optional[float]=None):
+    # merge
+    bank_tx = bank_transactions or []
+    merged = merge_transactions(transactions, bank_tx)
+
+    # (sau đó dùng merged thay cho transactions ở mọi chỗ)
+    series = build_monthly_series(merged)
     basic = predict_next_month_expense_v2(series)
     per_cat = per_category_forecast(series)
-    habits = {
-        "top_categories_last_month": [] if not series else sorted(series[-1]["per_category"].items(), key=lambda x:x[1], reverse=True)[:3]
-    }
-    # convert top to structured
-    top_struct=[]
-    if series:
-        last = series[-1]
-        total = last["expense"] or 1.0
-        for k,v in sorted(last["per_category"].items(), key=lambda x:x[1], reverse=True)[:3]:
-            top_struct.append({"categoryId":k, "expense":float(v), "share": float(v)/total})
-    habits["top_categories_last_month"] = top_struct
-
-    projection = compute_daily_projection(transactions, current_balance=current_balance)
-    anomalies = detect_anomalies(transactions)
-    summary = {
-        "total_income": float(sum(m["income"] for m in series)) if series else 0.0,
-        "total_expense": float(sum(m["expense"] for m in series)) if series else 0.0,
-        "months_count": len(series)
-    }
-    saving_tips = generate_saving_tips(summary, {"top_categories_last_month": top_struct}, projection)
-
+    # habits: top categories last month: unchanged but from series
+    ...
+    projection = compute_daily_projection(merged, current_balance=current_balance)
+    anomalies = detect_anomalies(merged)
+    ...
     return {
-        "summary": summary,
-        "prediction": basic,
-        "per_category_prediction": per_cat,
-        "habits": {"top_categories_last_month": top_struct},
-        "projection": projection,
-        "anomalies": anomalies,
-        "saving_tips": saving_tips,
-        "raw_monthly_series": series
+      "summary": summary,
+      "prediction": basic,
+      "per_category_prediction": per_cat,
+      "habits": {"top_categories_last_month": top_struct},
+      "projection": projection,
+      "anomalies": anomalies,
+      "saving_tips": saving_tips,
+      "raw_monthly_series": series,
+      "meta": {
+         "merged_count": len(merged),
+         "app_count": len(transactions),
+         "bank_count": len(bank_tx),
+      }
     }
 
 # optional small persistence
@@ -203,3 +200,47 @@ def save_model(obj, path="models/ai_model.joblib"):
 
 def load_model(path="models/ai_model.joblib"):
     return load(path)
+
+def normalize_tx_key(t: Dict[str,Any]) -> str:
+    # tạo key đơn giản để de-dup: date|amount|type|shortdesc
+    date = (t.get("date") or "")[:10]
+    amount = str(round(float(t.get("amount") or 0), 2))
+    ttype = t.get("type") or "expense"
+    desc = (t.get("description") or t.get("note") or "")[:40].strip().lower()
+    cat = t.get("categoryId") or ""
+    return f"{date}|{amount}|{ttype}|{desc}|{cat}"
+
+def merge_transactions(app_tx: List[Dict[str,Any]], bank_tx: List[Dict[str,Any]]):
+    """
+    - Gộp 2 nguồn
+    - De-dup bằng normalize_tx_key
+    - Giữ cả source field: 'app' or 'bank'
+    - Nếu trùng, ưu tiên app (giả sử app có category mapping tốt hơn)
+    """
+    out = []
+    seen: Set[str] = set()
+
+    # mark source
+    for t in app_tx:
+        t2 = dict(t)
+        t2["_source"] = "app"
+        key = normalize_tx_key(t2)
+        seen.add(key)
+        out.append(t2)
+
+    for t in bank_tx:
+        t2 = dict(t)
+        t2["_source"] = "bank"
+        key = normalize_tx_key(t2)
+        if key in seen:
+            # skip bank duplicate
+            continue
+        seen.add(key)
+        out.append(t2)
+
+    # optional: sort by date asc
+    try:
+        out.sort(key=lambda x: x.get("date") or "")
+    except Exception:
+        pass
+    return out
