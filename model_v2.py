@@ -1,0 +1,205 @@
+# ai-backend/model_v2.py
+from datetime import datetime
+from collections import defaultdict
+from typing import List, Dict, Any, Optional, Tuple
+import numpy as np
+from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import IsolationForest
+from joblib import dump, load
+import math
+
+def parse_date(d: str) -> datetime:
+    return datetime.strptime(d, "%Y-%m-%d")
+
+def build_monthly_series(transactions: List[Dict[str,Any]]):
+    months = {}
+    for t in transactions:
+        try:
+            dt = parse_date(t["date"])
+        except Exception:
+            continue
+        key = f"{dt.year}-{dt.month:02d}"
+        if key not in months:
+            months[key] = {"year": dt.year, "month": dt.month, "income":0.0, "expense":0.0, "per_category":defaultdict(float)}
+        amt = float(t.get("amount") or 0)
+        ttype = t.get("type","expense")
+        cat = t.get("categoryId","unknown")
+        if ttype == "income":
+            months[key]["income"] += amt
+        else:
+            months[key]["expense"] += amt
+            months[key]["per_category"][cat] += amt
+    keys = sorted(months.keys())
+    return [months[k] for k in keys]
+
+def linear_predict(y: np.ndarray) -> Tuple[float, float]:
+    # returns (pred, std_residual)
+    if len(y) == 0:
+        return 0.0, 0.0
+    X = np.arange(len(y)).reshape(-1,1)
+    if len(y) >= 3:
+        m = LinearRegression()
+        m.fit(X,y)
+        pred = float(m.predict([[len(y)]])[0])
+        residuals = y - m.predict(X)
+        std = float(np.std(residuals, ddof=1)) if len(residuals) > 1 else float(np.std(residuals))
+        return max(0.0, pred), std
+    else:
+        mean = float(np.mean(y))
+        std = float(np.std(y)) if len(y)>1 else 0.0
+        return mean, std
+
+def predict_next_month_expense_v2(series: List[Dict[str,Any]]):
+    if not series:
+        return {"predicted":0.0, "method":"no_data", "conf_interval":[0.0,0.0], "history": []}
+    y = np.array([m["expense"] for m in series], dtype=float)
+    pred, std = linear_predict(y)
+    # 95% CI approx
+    lo = max(0.0, pred - 1.96 * (std or 0.0))
+    hi = pred + 1.96 * (std or 0.0)
+    method = "linear_regression" if len(y) >= 3 else "mean_fallback"
+    return {
+        "predicted": pred,
+        "method": method,
+        "conf_interval": [lo, hi],
+        "history": [{"year":m["year"], "month":m["month"], "expense":float(m["expense"]), "income":float(m["income"])} for m in series]
+    }
+
+def per_category_forecast(series: List[Dict[str,Any]]):
+    # build monthly per-category series and run linear fit per category
+    # output: {cat: {pred, method, conf_interval}}
+    # aggregate months index
+    months = [f'{m["year"]}-{m["month"]:02d}' for m in series]
+    cat_map = defaultdict(list)  # cat -> list aligned with months
+    for m in series:
+        for cat, amt in m["per_category"].items():
+            cat_map[cat].append((f'{m["year"]}-{m["month"]:02d}', float(amt)))
+    res = {}
+    for cat, pairs in cat_map.items():
+        # align to full months (fill 0 if missing)
+        month_to_amt = {k:v for k,v in pairs}
+        y = np.array([month_to_amt.get(mon, 0.0) for mon in months], dtype=float)
+        pred, std = linear_predict(y)
+        lo = max(0.0, pred - 1.96 * (std or 0.0))
+        hi = pred + 1.96 * (std or 0.0)
+        res[cat] = {"predicted":pred, "conf_interval":[lo,hi], "method": "linear_regression" if len(y)>=3 else "mean_fallback"}
+    return res
+
+def detect_anomalies(transactions: List[Dict[str,Any]]):
+    # simple: z-score on amounts for expense and income separately, fallback to IsolationForest
+    amounts = np.array([float(t.get("amount") or 0) for t in transactions])
+    if len(amounts) >= 6:
+        mean = amounts.mean()
+        std = amounts.std(ddof=1) if len(amounts) > 1 else 0.0
+        anomalies = []
+        if std > 0:
+            for t in transactions:
+                z = (float(t.get("amount") or 0) - mean)/std
+                if abs(z) > 3.0:
+                    anomalies.append({"id": t.get("id"), "date": t.get("date"), "amount": t.get("amount"), "z": float(z)})
+            if anomalies:
+                return anomalies
+    # fallback IsolationForest (works on amounts)
+    try:
+        amounts_reshaped = amounts.reshape(-1,1)
+        iso = IsolationForest(contamination=0.03, random_state=42)
+        iso.fit(amounts_reshaped)
+        preds = iso.predict(amounts_reshaped)  # -1 anomaly
+        anomalies = []
+        for i, p in enumerate(preds):
+            if p == -1:
+                t = transactions[i]
+                anomalies.append({"id": t.get("id"), "date": t.get("date"), "amount": t.get("amount")})
+        return anomalies
+    except Exception:
+        return []
+
+def compute_daily_projection(transactions, current_balance=None, max_days=60):
+    # reuse simple average daily net approach (same as your old code)
+    # ... keep as before (omitted for brevity) or import if you prefer
+    # quick re-use small impl:
+    day_map={}
+    for t in transactions:
+        try:
+            dt = parse_date(t["date"])
+        except Exception:
+            continue
+        key = dt.strftime("%Y-%m-%d")
+        day_map.setdefault(key, {"income":0.0,"expense":0.0})
+        amt = float(t.get("amount") or 0)
+        if t.get("type")=="income":
+            day_map[key]["income"] += amt
+        else:
+            day_map[key]["expense"] += amt
+    sorted_days = sorted(day_map.keys())
+    if len(sorted_days) > max_days:
+        sorted_days = sorted_days[-max_days:]
+    incomes = [day_map[d]["income"] for d in sorted_days]
+    expenses = [day_map[d]["expense"] for d in sorted_days]
+    import numpy as _np
+    avg_inc = float(_np.mean(incomes)) if incomes else 0.0
+    avg_exp = float(_np.mean(expenses)) if expenses else 0.0
+    avg_net = avg_inc - avg_exp
+    proj_30_exp = max(0.0, avg_exp * 30)
+    proj_bal = None
+    if current_balance is not None:
+        proj_bal = float(current_balance + avg_net * 30)
+    return {"avg_daily_income":avg_inc,"avg_daily_expense":avg_exp,"avg_daily_net":avg_net,"projected_30d_expense":proj_30_exp,"projected_30d_balance":proj_bal,"days_used":len(sorted_days)}
+
+def generate_saving_tips(summary, habits, projection):
+    # you can reuse original rules; simplified here
+    tips=[]
+    total_income = summary.get("total_income",0.0)
+    total_expense = summary.get("total_expense",0.0)
+    months_count = summary.get("months_count",0)
+    if months_count>=2 and total_expense>total_income:
+        tips.append("Chi vượt thu: cân nhắc giảm chi tiêu hoặc tìm nguồn thu thêm.")
+    top = (habits.get("top_categories_last_month") or [])
+    if top and top[0].get("share",0) >= 0.4:
+        tips.append("Một nhóm chiếm >40% chi tháng gần nhất, xem lại nhóm đó.")
+    if not tips:
+        tips.append("Tình hình ổn, tiếp tục theo dõi.")
+    return tips
+
+def analyze_and_predict_v2(transactions: List[Dict[str,Any]], current_balance: Optional[float]=None):
+    series = build_monthly_series(transactions)
+    basic = predict_next_month_expense_v2(series)
+    per_cat = per_category_forecast(series)
+    habits = {
+        "top_categories_last_month": [] if not series else sorted(series[-1]["per_category"].items(), key=lambda x:x[1], reverse=True)[:3]
+    }
+    # convert top to structured
+    top_struct=[]
+    if series:
+        last = series[-1]
+        total = last["expense"] or 1.0
+        for k,v in sorted(last["per_category"].items(), key=lambda x:x[1], reverse=True)[:3]:
+            top_struct.append({"categoryId":k, "expense":float(v), "share": float(v)/total})
+    habits["top_categories_last_month"] = top_struct
+
+    projection = compute_daily_projection(transactions, current_balance=current_balance)
+    anomalies = detect_anomalies(transactions)
+    summary = {
+        "total_income": float(sum(m["income"] for m in series)) if series else 0.0,
+        "total_expense": float(sum(m["expense"] for m in series)) if series else 0.0,
+        "months_count": len(series)
+    }
+    saving_tips = generate_saving_tips(summary, {"top_categories_last_month": top_struct}, projection)
+
+    return {
+        "summary": summary,
+        "prediction": basic,
+        "per_category_prediction": per_cat,
+        "habits": {"top_categories_last_month": top_struct},
+        "projection": projection,
+        "anomalies": anomalies,
+        "saving_tips": saving_tips,
+        "raw_monthly_series": series
+    }
+
+# optional small persistence
+def save_model(obj, path="models/ai_model.joblib"):
+    dump(obj, path)
+
+def load_model(path="models/ai_model.joblib"):
+    return load(path)
