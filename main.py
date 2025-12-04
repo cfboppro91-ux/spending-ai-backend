@@ -1,4 +1,3 @@
-#ai-backend/main.py
 import os
 import json
 from typing import List, Dict, Any, Optional
@@ -6,7 +5,7 @@ from typing import List, Dict, Any, Optional
 from fastapi import FastAPI
 from pydantic import BaseModel
 
-from model import analyze_and_predict
+# sử dụng model_v2 (hỗ trợ bank tx merge)
 from model_v2 import analyze_and_predict_v2
 
 # OpenAI client (lib mới)
@@ -23,17 +22,21 @@ class Transaction(BaseModel):
     date: str
     amount: float
     type: str
-    categoryId: str
+    categoryId: Optional[str] = None
+    id: Optional[str] = None
+    description: Optional[str] = None
 
 
 class PredictRequest(BaseModel):
     transactions: List[Transaction]
+    bank_transactions: Optional[List[Transaction]] = None
     current_balance: Optional[float] = None
 
 
 class ChatRequest(BaseModel):
     question: str
     transactions: List[Transaction]
+    bank_transactions: Optional[List[Transaction]] = None
     current_balance: Optional[float] = None
 
 
@@ -45,8 +48,11 @@ def root():
 @app.post("/predict")
 def predict_spending(body: PredictRequest):
     tx_list: List[Dict[str, Any]] = [t.dict() for t in body.transactions]
-    result = analyze_and_predict(
+    bank_list: List[Dict[str, Any]] = [t.dict() for t in (body.bank_transactions or [])]
+
+    result = analyze_and_predict_v2(
         tx_list,
+        bank_transactions=bank_list,
         current_balance=body.current_balance
     )
     return result
@@ -57,14 +63,16 @@ def chat_spending_assistant(body: ChatRequest):
     """
     Trợ lý tài chính:
     - Nhận câu hỏi tự nhiên (ăn uống, giải trí…)
-    - Có dữ liệu chi tiêu + số dư ước tính
+    - Có dữ liệu chi tiêu + số dư ước tính (bao gồm cả bank_transactions)
     - Dùng OpenAI để trả lời.
     """
     tx_list: List[Dict[str, Any]] = [t.dict() for t in body.transactions]
+    bank_list: List[Dict[str, Any]] = [t.dict() for t in (body.bank_transactions or [])]
 
-    # Phân tích lại bằng model.py cho chắc (thói quen, dự đoán, tips…)
-    analysis = analyze_and_predict(
+    # phân tích lại bằng model_v2 (gộp app + bank)
+    analysis = analyze_and_predict_v2(
         tx_list,
+        bank_transactions=bank_list,
         current_balance=body.current_balance
     )
 
@@ -89,7 +97,7 @@ def chat_spending_assistant(body: ChatRequest):
     )
 
     completion = client.chat.completions.create(
-        model="gpt-4.1-mini",  # hoặc gpt-4.1 / gpt-4.1-mini tuỳ plan
+        model="gpt-4.1-mini",
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
