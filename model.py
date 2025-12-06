@@ -305,7 +305,7 @@ def generate_saving_tips(
     if months_count >= 2 and total_expense > total_income:
         tips.append(
             "Trong tổng dữ liệu, chi tiêu đang lớn hơn thu nhập. "
-            "M nên đặt giới hạn chi hàng tháng hoặc tăng nguồn thu để tránh âm tiền."
+            "Nên đặt giới hạn chi hàng tháng hoặc tăng nguồn thu để tránh âm tiền."
         )
 
     # 2. Top category tháng gần nhất chi quá nhiều
@@ -316,7 +316,7 @@ def generate_saving_tips(
         if share >= 0.4:
             tips.append(
                 "Một nhóm chi tiêu chiếm hơn 40% tổng chi tháng gần nhất. "
-                "M có thể xem lại các khoản trong nhóm này để cắt bớt những phần không cần thiết."
+                "Có thể xem lại các khoản trong nhóm này để cắt bớt những phần không cần thiết."
             )
 
     # 3. Cuối tuần chi nhiều
@@ -336,7 +336,7 @@ def generate_saving_tips(
     if peak_seg and peak_seg.get("segment") == "late" and peak_seg.get("expense", 0.0) > 0:
         tips.append(
             "Chi tiêu tập trung nhiều vào cuối tháng. "
-            "M có thể phân bổ chi đều hơn trong tháng để tránh cuối tháng bị thiếu tiền."
+            "Phân bổ chi đều hơn trong tháng để tránh cuối tháng bị thiếu tiền."
         )
 
     # 5. Dòng tiền âm (burn rate)
@@ -351,7 +351,7 @@ def generate_saving_tips(
     if not tips:
         tips.append(
             "Thói quen chi tiêu hiện tại khá ổn định. "
-            "M vẫn có thể tối ưu thêm bằng cách theo dõi kỹ các khoản lặt vặt và lên kế hoạch chi trước."
+            "Vẫn có thể tối ưu thêm bằng cách theo dõi kỹ các khoản lặt vặt và lên kế hoạch chi trước."
         )
 
     return tips
