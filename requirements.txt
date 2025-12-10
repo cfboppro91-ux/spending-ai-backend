@@ -8,3 +8,4 @@ openai
 joblib
 scipy
 sqlalchemy
+psycopg2-binary
