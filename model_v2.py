@@ -1,5 +1,5 @@
 #ai-backend/model_v2.py
-from datetime import datetime
+from datetime import datetime, timedelta
 from collections import defaultdict
 from typing import List, Dict, Any, Optional, Tuple
 import numpy as np
