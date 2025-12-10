@@ -248,6 +248,8 @@ def compute_daily_projection(transactions, current_balance=None, max_days=60):
     # quick re-use small impl:
     day_map={}
     for t in transactions:
+        src_count[t.get("_source", "unknown")] += 1
+    print("🔍 projection source:", dict(src_count))
         try:
             dt = parse_date(t["date"])
         except Exception:
