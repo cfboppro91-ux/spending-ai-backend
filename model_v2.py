@@ -249,7 +249,8 @@ def compute_daily_projection(transactions, current_balance=None, max_days=60):
     day_map={}
     src_count = {}
     for t in transactions:
-        src_count[t.get("_source", "unknown")] += 1
+        src = t.get("_source", "unknown")
+        src_count[src] = src_count.get(src, 0) + 1   # ✅ không còn KeyError
         print("🔍 projection source:", dict(src_count))
         try:
             dt = parse_date(t["date"])
