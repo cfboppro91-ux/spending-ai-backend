@@ -15,7 +15,7 @@ GLOBAL_BASELINE = None  # sẽ là dict: {"reg": ..., "mean": ..., "months": int
 
 def train_global_baseline(transactions: List[Dict[str, Any]]):
     """
-    Train global model từ dữ liệu mẫu (vd: transaction_12m).
+    Train global model từ dữ liệu mẫu .
     Lưu lại slope + intercept + mean để dùng cho user sau này.
     """
     global GLOBAL_BASELINE
@@ -125,7 +125,7 @@ def linear_predict(y: np.ndarray) -> Tuple[float, float]:
 
 def predict_next_month_expense_v2(series: List[Dict[str,Any]]):
     """
-    - Nếu user có >=3 tháng: dùng thuần data user (linear_regression / mean_fallback như cũ).
+    - Nếu user có >=3 tháng: dùng thuần data user .
     - Nếu user có 0–2 tháng: blend giữa global model (học từ 6 tháng mẫu)
       và user data.
     """

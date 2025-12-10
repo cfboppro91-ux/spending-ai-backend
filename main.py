@@ -49,38 +49,28 @@ def root():
 
 @app.post("/predict")
 def predict_spending(body: PredictRequest):
-    # Data user gửi lên
     tx_list: List[Dict[str, Any]] = [t.dict() for t in body.transactions]
     bank_list: List[Dict[str, Any]] = [t.dict() for t in (body.bank_transactions or [])]
 
-    # Xem user hiện có bao nhiêu tháng data
+    # Đếm số tháng DATA USER (để debug / show nếu thích)
     user_series = build_monthly_series(tx_list)
     user_months = len(user_series)
 
-    # Mặc định: chỉ dùng data user
-    final_tx = tx_list
-    sample_used = False
-
-    # Nếu user < 3 tháng -> gộp thêm 6 tháng mẫu
-    if user_months < 3:
-        sample_tx = load_sample_transactions()
-        final_tx = sample_tx + tx_list
-        sample_used = True
-
+    # ❗ KHÔNG gộp sample vào đây nữa
     result = analyze_and_predict_v2(
-        final_tx,
+        tx_list,                       # chỉ user + bank
         bank_transactions=bank_list,
         current_balance=body.current_balance,
     )
 
-    # chỉnh lại meta cho dễ debug
     meta = result.get("meta", {})
     meta["user_tx_count"] = len(tx_list)
-    meta["used_sample_12m"] = sample_used
     meta["user_months"] = user_months
+    meta["used_sample_12m"] = False   # để biết chắc không trộn sample
     result["meta"] = meta
 
     return result
+
 
 
 @app.post("/chat")
