@@ -242,41 +242,92 @@ def detect_anomalies(transactions: List[Dict[str,Any]]):
     except Exception:
         return []
 
-def compute_daily_projection(transactions, current_balance=None, max_days=60):
-    # reuse simple average daily net approach (same as your old code)
-    # ... keep as before (omitted for brevity) or import if you prefer
-    # quick re-use small impl:
-    day_map={}
-    src_count = {}
+def compute_daily_projection(
+    transactions: List[Dict[str, Any]],
+    current_balance: Optional[float] = None,
+    max_days: int = 60,
+):
+    if not transactions:
+        return {
+            "avg_daily_income": 0.0,
+            "avg_daily_expense": 0.0,
+            "avg_daily_net": 0.0,
+            "projected_30d_expense": 0.0,
+            "projected_30d_balance": current_balance,
+            "days_used": 0,
+        }
+
+    day_map: Dict[str, Dict[str, float]] = {}
+    all_dates = []
+    src_count = defaultdict(int)
+
     for t in transactions:
-        src = t.get("_source", "unknown")
-        src_count[src] = src_count.get(src, 0) + 1   # ✅ không còn KeyError
-        print("🔍 projection source:", dict(src_count))
+        src_count[t.get("_source", "unknown")] += 1
+
         try:
             dt = parse_date(t["date"])
         except Exception:
             continue
+
+        all_dates.append(dt.date())
         key = dt.strftime("%Y-%m-%d")
-        day_map.setdefault(key, {"income":0.0,"expense":0.0})
-        amt = float(t.get("amount") or 0)
-        if t.get("type")=="income":
+
+        if key not in day_map:
+            day_map[key] = {"income": 0.0, "expense": 0.0}
+
+        amt = float(t.get("amount") or 0.0)
+        if t.get("type") == "income":
             day_map[key]["income"] += amt
         else:
             day_map[key]["expense"] += amt
-    sorted_days = sorted(day_map.keys())
-    if len(sorted_days) > max_days:
-        sorted_days = sorted_days[-max_days:]
-    incomes = [day_map[d]["income"] for d in sorted_days]
-    expenses = [day_map[d]["expense"] for d in sorted_days]
+
+    # ✅ log 1 lần thôi
+    print("🔍 projection source:", dict(src_count))
+
+    if not all_dates:
+        return {
+            "avg_daily_income": 0.0,
+            "avg_daily_expense": 0.0,
+            "avg_daily_net": 0.0,
+            "projected_30d_expense": 0.0,
+            "projected_30d_balance": current_balance,
+            "days_used": 0,
+        }
+
+    last_day = max(all_dates)
+    first_day = max(min(all_dates), last_day - timedelta(days=max_days - 1))
+
+    incomes = []
+    expenses = []
+
+    cur = first_day
+    while cur <= last_day:
+        key = cur.strftime("%Y-%m-%d")
+        rec = day_map.get(key, {"income": 0.0, "expense": 0.0})
+        incomes.append(rec["income"])
+        expenses.append(rec["expense"])
+        cur += timedelta(days=1)
+
     import numpy as _np
-    avg_inc = float(_np.mean(incomes)) if incomes else 0.0
-    avg_exp = float(_np.mean(expenses)) if expenses else 0.0
+    avg_inc = float(_np.mean(incomes))
+    avg_exp = float(_np.mean(expenses))
     avg_net = avg_inc - avg_exp
-    proj_30_exp = max(0.0, avg_exp * 30)
-    proj_bal = None
-    if current_balance is not None:
-        proj_bal = float(current_balance + avg_net * 30)
-    return {"avg_daily_income":avg_inc,"avg_daily_expense":avg_exp,"avg_daily_net":avg_net,"projected_30d_expense":proj_30_exp,"projected_30d_balance":proj_bal,"days_used":len(sorted_days)}
+
+    proj_30_exp = max(0.0, avg_exp * 30.0)
+    proj_30_balance = (
+        float(current_balance + avg_net * 30.0)
+        if current_balance is not None
+        else None
+    )
+
+    return {
+        "avg_daily_income": avg_inc,
+        "avg_daily_expense": avg_exp,
+        "avg_daily_net": avg_net,
+        "projected_30d_expense": proj_30_exp,
+        "projected_30d_balance": proj_30_balance,
+        "days_used": len(incomes),
+    }
 
 def generate_saving_tips(summary, habits, projection):
     # you can reuse original rules; simplified here
