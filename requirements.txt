@@ -7,3 +7,4 @@ scikit-learn
 openai
 joblib
 scipy
+sqlalchemy

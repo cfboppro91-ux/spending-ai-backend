@@ -6,8 +6,8 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 
 # sử dụng model_v2 (hỗ trợ bank tx merge)
-from model_v2 import analyze_and_predict_v2
-
+from model_v2 import analyze_and_predict_v2, build_monthly_series
+from sample_loader import load_sample_transactions
 # OpenAI client (lib mới)
 from openai import OpenAI
 
@@ -47,14 +47,37 @@ def root():
 
 @app.post("/predict")
 def predict_spending(body: PredictRequest):
+    # Data user gửi lên
     tx_list: List[Dict[str, Any]] = [t.dict() for t in body.transactions]
     bank_list: List[Dict[str, Any]] = [t.dict() for t in (body.bank_transactions or [])]
 
+    # Xem user hiện có bao nhiêu tháng data
+    user_series = build_monthly_series(tx_list)
+    user_months = len(user_series)
+
+    # Mặc định: chỉ dùng data user
+    final_tx = tx_list
+    sample_used = False
+
+    # Nếu user < 3 tháng -> gộp thêm 6 tháng mẫu
+    if user_months < 3:
+        sample_tx = load_sample_transactions()
+        final_tx = sample_tx + tx_list
+        sample_used = True
+
     result = analyze_and_predict_v2(
-        tx_list,
+        final_tx,
         bank_transactions=bank_list,
-        current_balance=body.current_balance
+        current_balance=body.current_balance,
     )
+
+    # chỉnh lại meta cho dễ debug
+    meta = result.get("meta", {})
+    meta["user_tx_count"] = len(tx_list)
+    meta["used_sample_12m"] = sample_used
+    meta["user_months"] = user_months
+    result["meta"] = meta
+
     return result
 
 
