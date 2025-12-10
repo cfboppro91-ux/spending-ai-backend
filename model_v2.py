@@ -9,6 +9,79 @@ from joblib import dump, load
 import math
 from typing import Set
 
+GLOBAL_BASELINE_PATH = "models/global_baseline.joblib"
+GLOBAL_BASELINE = None  # sẽ là dict: {"reg": ..., "mean": ..., "months": int}
+
+
+def train_global_baseline(transactions: List[Dict[str, Any]]):
+    """
+    Train global model từ dữ liệu mẫu (vd: transaction_12m).
+    Lưu lại slope + intercept + mean để dùng cho user sau này.
+    """
+    global GLOBAL_BASELINE
+
+    series = build_monthly_series(transactions)
+    if not series:
+        GLOBAL_BASELINE = None
+        return
+
+    y = np.array([m["expense"] for m in series], dtype=float)
+    X = np.arange(len(y)).reshape(-1, 1)
+
+    baseline: Dict[str, Any] = {
+        "mean": float(y.mean()),
+        "months": int(len(y)),
+    }
+
+    if len(y) >= 3:
+        reg = LinearRegression()
+        reg.fit(X, y)
+        baseline["reg_coef"] = float(reg.coef_[0])
+        baseline["reg_intercept"] = float(reg.intercept_)
+    else:
+        baseline["reg_coef"] = None
+        baseline["reg_intercept"] = None
+
+    GLOBAL_BASELINE = baseline
+    # lưu ra file
+    os.makedirs("models", exist_ok=True)
+    dump(baseline, GLOBAL_BASELINE_PATH)
+
+
+def load_global_baseline():
+    global GLOBAL_BASELINE
+    if GLOBAL_BASELINE is not None:
+        return GLOBAL_BASELINE
+    try:
+        baseline = load(GLOBAL_BASELINE_PATH)
+        GLOBAL_BASELINE = baseline
+        return baseline
+    except Exception:
+        GLOBAL_BASELINE = None
+        return None
+
+
+def predict_from_global_baseline() -> Optional[float]:
+    """
+    Dự đoán chi tháng sau theo model global (không có data user).
+    """
+    baseline = load_global_baseline()
+    if not baseline:
+        return None
+
+    months = baseline.get("months", 0)
+    mean = baseline.get("mean", 0.0)
+    coef = baseline.get("reg_coef")
+    intercept = baseline.get("reg_intercept")
+
+    if coef is not None and intercept is not None and months > 0:
+        # dự đoán cho tháng tiếp theo sau chuỗi global
+        x_next = np.array([[months]])  # index = số tháng hiện có
+        pred = float(coef * x_next[0][0] + intercept)
+        return max(0.0, pred)
+    else:
+        return max(0.0, float(mean))
+
 def parse_date(d: str) -> datetime:
     return datetime.strptime(d, "%Y-%m-%d")
 
@@ -51,19 +124,73 @@ def linear_predict(y: np.ndarray) -> Tuple[float, float]:
         return mean, std
 
 def predict_next_month_expense_v2(series: List[Dict[str,Any]]):
+    """
+    - Nếu user có >=3 tháng: dùng thuần data user (linear_regression / mean_fallback như cũ).
+    - Nếu user có 0–2 tháng: blend giữa global model (học từ 6 tháng mẫu)
+      và user data.
+    """
     if not series:
-        return {"predicted":0.0, "method":"no_data", "conf_interval":[0.0,0.0], "history": []}
+        # không có data user -> thử dùng global model
+        global_pred = predict_from_global_baseline()
+        if global_pred is not None:
+            return {
+                "predicted": global_pred,
+                "method": "global_only",
+                "conf_interval": [global_pred, global_pred],
+                "history": [],
+            }
+        return {"predicted": 0.0, "method": "no_data", "conf_interval": [0.0, 0.0], "history": []}
+
     y = np.array([m["expense"] for m in series], dtype=float)
-    pred, std = linear_predict(y)
-    # 95% CI approx
-    lo = max(0.0, pred - 1.96 * (std or 0.0))
-    hi = pred + 1.96 * (std or 0.0)
-    method = "linear_regression" if len(y) >= 3 else "mean_fallback"
+    user_months = len(y)
+
+    # user-based prediction (giống cũ)
+    user_pred, user_std = linear_predict(y)
+    base_method = "linear_regression" if user_months >= 3 else "mean_fallback"
+
+    global_pred = predict_from_global_baseline()
+
+    # Nếu đủ 3 tháng -> dùng user 100%
+    if user_months >= 3 or global_pred is None:
+        lo = max(0.0, user_pred - 1.96 * (user_std or 0.0))
+        hi = user_pred + 1.96 * (user_std or 0.0)
+        return {
+            "predicted": user_pred,
+            "method": base_method,
+            "conf_interval": [lo, hi],
+            "history": [
+                {
+                    "year": m["year"],
+                    "month": m["month"],
+                    "expense": float(m["expense"]),
+                    "income": float(m["income"]),
+                }
+                for m in series
+            ],
+        }
+
+    # ---- Blend global + user (0–2 tháng user) ----
+    # weight theo số tháng user: 0 -> 0, 1 -> 1/3, 2 -> 2/3
+    alpha = min(1.0, user_months / 3.0)
+    blended_pred = float(alpha * user_pred + (1.0 - alpha) * global_pred)
+
+    # std tạm thời dùng user_std cho đơn giản
+    lo = max(0.0, blended_pred - 1.96 * (user_std or 0.0))
+    hi = blended_pred + 1.96 * (user_std or 0.0)
+
     return {
-        "predicted": pred,
-        "method": method,
+        "predicted": blended_pred,
+        "method": "global_user_blend",
         "conf_interval": [lo, hi],
-        "history": [{"year":m["year"], "month":m["month"], "expense":float(m["expense"]), "income":float(m["income"])} for m in series]
+        "history": [
+            {
+                "year": m["year"],
+                "month": m["month"],
+                "expense": float(m["expense"]),
+                "income": float(m["income"]),
+            }
+            for m in series
+        ],
     }
 
 def per_category_forecast(series: List[Dict[str,Any]]):

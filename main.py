@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 
 # sử dụng model_v2 (hỗ trợ bank tx merge)
-from model_v2 import analyze_and_predict_v2, build_monthly_series
+from model_v2 import analyze_and_predict_v2, build_monthly_series, train_global_baseline
 from sample_loader import load_sample_transactions
 # OpenAI client (lib mới)
 from openai import OpenAI
@@ -39,6 +39,8 @@ class ChatRequest(BaseModel):
     bank_transactions: Optional[List[Transaction]] = None
     current_balance: Optional[float] = None
 
+class TrainRequest(BaseModel):
+    transactions: List[Transaction]
 
 @app.get("/")
 def root():
@@ -134,3 +136,15 @@ def chat_spending_assistant(body: ChatRequest):
         "answer": answer,
         "analysis": analysis,
     }
+
+@app.post("/train/global")
+def train_global(body: TrainRequest):
+    """
+    Train global baseline model từ dữ liệu mẫu (vd: transaction_12m).
+    Gọi endpoint này 1 lần từ backend chính (hoặc script) với 6 tháng mẫu.
+    """
+    tx_list: List[Dict[str, Any]] = [t.dict() for t in body.transactions]
+
+    train_global_baseline(tx_list)
+
+    return {"msg": "trained_global_baseline", "count": len(tx_list)}
